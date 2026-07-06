@@ -16,19 +16,102 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
-      - name: Install deps
-        run: pip install python-pptx
-      - name: Run generator
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip python-pptx markdown beautifulsoup4 lxml
+
+      - name: Generate PPTX from Markdown
         run: |
-          mkdir -p scripts
-          cat > scripts/generate_pptx.py <<'PY'
-          # (把上面 generate_pptx.py 的完整内容粘贴到这里)
+          python - <<'PY'
+          #!/usr/bin/env python3
+          from pathlib import Path
+          import sys
+          import markdown
+          from bs4 import BeautifulSoup
+          from pptx import Presentation
+          from pptx.util import Inches, Pt
+
+          def md_to_pptx(md_path, pptx_path):
+              md_file = Path(md_path)
+              if not md_file.exists():
+                  print(f"Input markdown not found: {md_path}")
+                  sys.exit(1)
+
+              html = markdown.markdown(md_file.read_text(encoding='utf-8'))
+              soup = BeautifulSoup(html, 'html.parser')
+              prs = Presentation()
+
+              # Pick a Title & Content layout if available
+              layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
+              current_body = None
+
+              # Walk the parsed HTML; create a new slide on headings, append paragraphs/lists to the current slide
+              for element in soup.find_all(['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li']):
+                  name = element.name
+                  text = element.get_text(separator='\n').strip()
+                  if not text:
+                      continue
+
+                  if name in ('h1', 'h2', 'h3'):
+                      slide = prs.slides.add_slide(layout)
+                      # set title
+                      try:
+                          slide.shapes.title.text = text
+                      except Exception:
+                          # fallback: create textbox as title
+                          tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(1))
+                          tx.text_frame.text = text
+                      # prepare body placeholder if exists
+                      try:
+                          current_body = slide.shapes.placeholders[1].text_frame
+                          # clear default paragraph text
+                          if current_body.paragraphs and current_body.paragraphs[0].text:
+                              current_body.paragraphs[0].text = ''
+                      except Exception:
+                          current_body = slide.shapes.add_textbox(Inches(1), Inches(1.6), Inches(8), Inches(4.5)).text_frame
+
+                  else:
+                      # paragraph / list item
+                      if current_body is None:
+                          slide = prs.slides.add_slide(layout)
+                          try:
+                              current_body = slide.shapes.placeholders[1].text_frame
+                              if current_body.paragraphs and current_body.paragraphs[0].text:
+                                  current_body.paragraphs[0].text = ''
+                          except Exception:
+                              current_body = slide.shapes.add_textbox(Inches(1), Inches(1.6), Inches(8), Inches(4.5)).text_frame
+
+                      # Add paragraph (append)
+                      # If the first paragraph is empty, use it; otherwise add a new one.
+                      if len(current_body.paragraphs) == 0 or current_body.paragraphs[0].text == '':
+                          p = current_body.paragraphs[0]
+                          p.text = text
+                      else:
+                          p = current_body.add_paragraph()
+                          p.text = text
+                      p.font.size = Pt(18)
+
+              # Ensure output dir exists
+              out = Path(pptx_path)
+              out.parent.mkdir(parents=True, exist_ok=True)
+              prs.save(str(out))
+              print(f"Saved PPTX to {out}")
+
+          if __name__ == '__main__':
+              # default args: input and output are provided by action via positional args
+              import os
+              args = os.environ.get('INPUT_ARGS', '').split()
+              # fallback to positional arguments if any provided on the shell (we'll just accept two fixed paths)
+              md = 'docs/slides.md'
+              pptx = 'docs/presentation.pptx'
+              md_to_pptx(md, pptx)
           PY
-          python scripts/generate_pptx.py docs/slides.md docs/presentation.pptx
+
       - name: Commit and push PPTX
         run: |
           git config user.name "github-actions[bot]"
